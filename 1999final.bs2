@@ -1,0 +1,1225 @@
+'before play: verify that the trim maps to the right joystick wheel
+'(on practice bot it's sensor3)
+'
+'DISNEY3.BS2, sourced from DISNEY2 in florida, same except
+'trim is half as sensitive.
+'
+'DISNEY2.BS2, sourced from DISNEY1 on 4/16, same except includes
+'the wheel differential 'trim' as tested on the homebrew bot
+'(like WILDRX_4) and right_trigger state is also mapped to turbo.
+'
+'DISNEY1.BS2, sourced from BHARP.BSW on Monday 3/29 while replacing
+'a potentially-damaged pot.
+'
+'BHARP.BS2, sourced from AAAAHARP.BS2 on Sunday after Harper by
+'Jim Butler.
+'Changes:
+'	Changed MIN_POT to 30
+
+
+DEBUG_ENABLE CON 0  'set to 1 to print debug stuff (slow)
+'kmk
+TWITCHP      CON 0  'set to 1 to disable twitch test
+
+
+
+'HARPER.BS2
+
+'kmk marks changes... to merge to harper_x
+
+'CAUTION: if you use this version, the left joystick button
+'must be disabled (in hardware) because this version still
+'has obsolete left_button code which interferes with stuff
+
+
+'THIS IS THE VERSION LOADED FOR PRACTICE SUNDAY EVENING 2/21/99
+'FOR HARPER.  THIS FILE IS NOW READ-ONLY, TRYING TO "SAVE" IT
+'WILL RETURN AN ERROR (make a copy if you're desperate).
+'VERSION HARPER_X.BS2 CONTINUES FROM THIS BASELINE.
+
+
+
+'TODO:
+
+'split development branch to freeze harper version and work
+'      on adding tank skew constants..
+
+'rewrite duplicate PWM writes using tmp255 
+
+'unlock automatically when going up
+
+'diana says claw has "delayed reaction".  ?service more frequently
+'in a subroutine?
+
+'jim wants to tweak the steering to eliminate crab deadzone a bit more..
+
+'??tighten service loop for gurney slowdown?
+
+'currently, lift does 'bump' up when unlocked, but
+'driver must still unlock lift before lowering
+
+
+
+'remove hard coded comments re:mappings, use all aliases
+'TODO: CLEANUP ALL!  make readable aliases (#defines) for
+'all inputs and outputs so they can be remapped at will...
+'(it would be nice for switches to map to relays by number,
+'so we can watch the LEDs, i.e. move the proportional inputs
+'to unused switch numbers like 8,7...)
+'pseudocode stuff consisely (show as positive logic),
+'remove redundant expressions to save eeprom, verify short
+'branches are the default.
+
+
+'NOTE: we are now at the point where we're REUSING RAM
+'variables because there aren't enough to go around..
+'be attentive to this if you move code around!  Alt-F
+'and Alt-N will help you search for where things are used.
+
+'[UPDATE: I cleaned up a bunch of wasteful stuff (extra
+' debug etc), so eeprom is not very low anymore..]
+'
+'also EEPROM is scarce, if you run out:
+'comment out extra debug stuff (they have expensive ascii
+'strings), extra unused sensors etc.
+'rewrite the transform to use bytes instead of
+'words (will free up 255 bytes), clean up any redundant
+'computations, maybe move calibration stuff out to a
+'special seperate load?
+
+
+'todo: fix steering override, the pot always reads 0
+'so we can't do proportional steering, just go slowly
+'in the direction of the stick...
+
+
+' SEE WildNotes.bs2 for important notes on the code (and other misc).
+'
+' IMPORTANT: to not damage the pot mechanically we should not
+' keep trying to drive it past its value at the end of its
+' range.  make sure these values are measured to be accurate
+' (or conservative.) Q: can low batteries affect the range??
+'
+MIN_POT CON 30   'minimal value we allow the pot to turn,
+		 'keep this greater than 0 because we rely
+		 'on 0 to indicate the pot is "broken"
+MAX_POT CON 224  'this is approximately what the current pot reads at max.
+'maybe make these conservative by a point or two...
+
+' part-dependent values: these need to be re-measured, or calibrated
+' somehow depending on the specific pot used:
+
+RIGHT_90  CON 40  ' steering pot value for "right 90 degrees"
+AHEAD_0   CON 128 ' steering pot value for "straight ahead"
+LEFT_90   CON 228 ' steering pot value for "left 90 degrees"
+
+
+RIGHT_OFFSET CON AHEAD_0-RIGHT_90 ' steering pot offset for "right 90 degrees"
+LEFT_OFFSET  CON LEFT_90-AHEAD_0  ' steering pot offset for "left 90 degrees"
+' e.g. if pot=15 is 90 degres right, 127-15=112 is the right-offset
+' to add to the 'center' position.
+
+
+
+' PROGRAM: WildStang.BS2
+'
+' Program run by User Programmable CPU in 1998 FIRST Receiver Board
+' Default code: Eric Rasmussen Date: 12/11/97
+'
+' Application written by: Motorola WildStang Team 2/99
+'
+' some Contact info
+' tricia:
+' keith iden pvt.id: 8198, rampage 13174
+' jim:
+' aaron:
+' Version:
+' 0.1 - made basic steering feedback loop with students. 1/27/99
+' 0.2 - add shutoff limits for steering pot. 1/27/99
+' 0.3 - modes, drive motors.. 1/28/99 [untested]
+' 0.4 - double button press, 90 degree offset steering
+'       try to guess the outputs & polarities we'll use. 1/29/99
+' 0.5 - rewrite things to use more bitwise logic and branch constructs.
+'       greatly streamlined. 1/30/99
+' 0.6 - reversed pot geometry (it's being mounted from the top) and
+'       all the calculations, working on getting the safety limits
+'       right (not done), added a constant to disable the debug prints,
+'       changed init to start in tank mode but wait for throttle before
+'       setting wheels, rewrote mode setting to use left joystick
+'       instead of buttons. tested drive wheels on real frame, looks ok.
+'       1/30/99
+' 1.0 - finish the steering pot safety limits, 2/2/99.
+' 1.1 - fix overflow cases in the steering feedback.
+' 1.2 - software written to control switches, switches have eaten the pwms
+'       and the relays are setup for the switches.
+' 1.3 - implement lookup tables to transform pwm output (needs refinement)
+' 1.4 - add wheel lift control and limit switch, add broken pot test
+' 1.5   and steering disable (need to finish this with an override),
+'       (working on gurney control, pot scaling test and transform stuff..)
+' 1.6 - gurney limit switch, pot scaling 'twitch' test.  2/18/99
+' 1.7 - improving gurney limit.. kickback?
+' 1.8 - rewrite lookup table by hand to use bytes instead of words 2/19.
+' 1.9 - map to new button box including arm, make aliases for switches etc.
+'       kickback is not done yet.. forget it, spokes slip! use a slowdown.
+' 2.0 - working on gurney slowdown..
+' 2.1 - add goal grabber relay, remap some inputs for new button box
+'       and driver requests. (broken-pot override is disabled at
+'       the moment) 2/20/99.  lift lock servo, 2/21/99
+' 2.2 - add upward 'bump' of lift on unlock. clean up a bunch of the
+'       old comments... 2/22/99
+' 2.3 - unlock lift unconditionally when going UP.  disabled throttle
+'       'safety' becaue ?low power is resetting the board during play?
+' 2.4 - cleanup duplicate pwm writes...
+'
+
+' Control Program Outline:
+'
+' Init
+'
+' test pot sanity
+'
+' Main Loop
+'
+'   read inputs (buttons, joystick angles..)
+'
+'   set steering mode based on left joystick
+'   [OLD: if buttons have been pressed and released, set steering mode]
+'
+'   WHEEL SPEEDS
+'   if in crab mode, set both motors to the same speed (may need
+'      calibration) as given by the y value of right stick.
+'
+'   if in tank mode, set motor speeds according to the
+'      combined x/y equations.
+'
+'   WHEEL ANGLE
+'   if in tank mode
+'      fix the steering at 0 degrees.
+'    get steering value from x of left stick
+'
+'   if in crab mode
+'      get steering value from x of right stick
+'      add +-90 degree offset to the stick steering.
+'
+'   adjust wheel angle through feedback
+
+'   low freq branch
+'      print debug info, other test, calibration, and checks.
+'   end low freq branch
+'
+'   write other outputs (drive motors, etc.)
+'
+' goto Main Loop
+'
+' ------------------------------------------------------------------
+
+' Put team stamp in eeprom <optional>
+' (eeprom good for about 10 million writes, no problem if
+' you don't write in a high frequency loop)
+' note: unused areas of eeprom are not overwritten by download.
+
+'eepromID  data  @$01,"WildStang 1999"  'data labels are e2 addresses
+'eehappy   data  @$31,1(14)
+
+max_delta_t data 0
+'max_delta_t data @$31,1  'clear to 1 once per download.
+
+'xtable data 39,41,42,44,45,46,48,49,51,52, 53,55,56,57,59,60,61,62,64,65, 66,67,68,69,71,72,73,74,75,76, 77,78,79,80,81,82,83,83,84,85, 86,87,88,89,89,90,91,92,92,93, 94,95,95,96,97,97,98,99,99,100, 100,101,102,102,103,103,104,104,105,106, 106,107,107,107,108,108,109,109,110,110, 111,111,111,112,112,113,113,113,114,114, 115,115,115,116,116,116,117,117,117,118, 118,118,119,119,119,119,120,120,120,121, 121,121,121,122,122,122,123,123,123,123, 124,124,124,124,125,125,125,125,126,126, 126,127,127,127,127,128,128,128,129,129, 129,129,130,130,130,131,131,131,132,132, 132,133,133,133,134,134,134,135,135,135, 136,136,137,137,137,138,138,139,139,140, 140,141,141,142,142,143,143,144,144,145, 145,146,146,147,147,148,149,149,150,151, 151,152,153,153,154,155,155,156,157,158, 158,159,160,161,162,162,163,164,165,166, 167,168,169,170,171,172,173,174,175,176, 177,178,179,180,181,182,184,185,186,187, 189,190,191,192,194,195,196,198,199,201, 202,203,205,206,208,210,211,213,214,216, 218,219,221,223,224,226
+
+
+'
+' Declare variables
+' We have a total of 32 bytes of ram (and a couple K of eeprom if needed)
+' 6 are used by the chip for IO states, 19 for the FIRST IO (below) which
+' leaves us about 7 to work with...
+'
+' (note: don't use those predefined vars like 'OUT6' described in
+' the basic manual, they're just unprotected memory addresses.)
+'
+' Symbols can be 32 characters long, not case sensitive.
+' Use the 'original' names of the variables when doing I/O (reading
+' and writing) so the HW mapping always matches Table 2.7 (manual p.28).
+' Use the 'alias' names when computing, so the logic is readable and
+' the mapping can be changed easily right here:
+'
+x1        VAR byte
+right_x   VAR x1        'WS: alias x1 to be the right joystick x
+
+y1        VAR byte
+right_y   VAR y1        'WS: alias y1 to be the right joystick y
+
+x2        VAR byte
+left_x    VAR x2        'WS: alias x2 to be the left joystick x
+
+y2        VAR byte
+left_y    VAR y2        'WS: alias y2 to be the left joystick y
+
+tx_pot1   VAR byte      'WS: these tx pots aren't used right now
+wheel1    VAR byte      '   so we could reuse this ram if needed.
+tx_pot2   VAR byte
+wheel2    VAR byte
+
+tx_sw     VAR word
+rx_sw     VAR word
+
+sensor1   VAR byte        'rx_pot
+steering_pot VAR sensor1  'WS: alias sensor1 to be the wheel angle potentiometer
+
+'sensor2   VAR byte
+'sensor3   VAR byte
+'sensor4   VAR byte
+
+relays    VAR word
+
+delta_t   VAR byte ' Time delay (units = 20 ms) between loop iterations
+' delta_t = 1 means no missing/bad data (1st packet)
+' delta_t > 1 means data is missing/bad, but it could be due to a slow
+' User Control Program loop speed which will cause Master CPU to miss data
+' (delta_t=2 or 3 is common).
+
+timeslice  VAR byte     ' used for executing some services less frequently than every loop
+
+pot_target VAR byte  ' not directly aliased to right_x because we may offset this
+
+steering_motor VAR byte
+left_speed  VAR byte
+right_speed VAR byte
+trim VAR wheel1
+
+mode  VAR nib   'steering mode
+'buttons_seen VAR nib  'can we still << if this is bit(2)?
+
+'char_tmp  VAR byte    'dke, tmp var for printing strings
+'count15   VAR nib     'dke, small counter variable
+
+
+tmp255  VAR byte    'a byte that gets reused a lot.. don't depend
+		    'on it retaining its value...
+
+
+driver_seen VAR bit
+pot_broken  VAR bit  'disable proportional steering pwm if 1
+prev_sw     VAR bit  'previous state of the wheel lift sensor
+prev_button VAR bit  'previous state of the lift lock button
+wheelflag   VAR bit  'enable/disable flag for wheel lift motor
+twitch_done VAR bit
+'kick_done   VAR bit
+
+
+'
+' Define Aliases (variables which are sub-divisions of those defined above)
+'                (aliases don't require any additional RAM)
+' [8 fwd/rev switches on the Transmitter]
+
+sw1_fwd   VAR tx_sw.bit0     ' Aliases for each TX switch input
+sw1_rev   VAR tx_sw.bit1
+sw2_fwd   VAR tx_sw.bit2
+sw2_rev   VAR tx_sw.bit3
+sw3_fwd   VAR tx_sw.bit4
+sw3_rev   VAR tx_sw.bit5
+sw4_fwd   VAR tx_sw.bit6
+sw4_rev   VAR tx_sw.bit7
+sw5_fwd   VAR tx_sw.bit8
+sw5_rev   VAR tx_sw.bit9
+sw6_fwd   VAR tx_sw.bit10
+sw6_rev   VAR tx_sw.bit11
+sw7_fwd   VAR tx_sw.bit12
+sw7_rev   VAR tx_sw.bit13
+sw8_fwd   VAR tx_sw.bit14
+sw8_rev   VAR tx_sw.bit15
+
+
+' Button box switches etc..
+
+right_trigger VAR sw1_fwd      'bit 0 WAS unused
+right_button VAR sw1_rev
+
+lift_lock  VAR sw2_fwd
+' left_trigger VAR sw2_fwd
+
+left_button  VAR sw2_rev
+pot_override VAR left_button  'alias.. same thing.
+
+claw_open_sw  VAR sw3_rev
+claw_close_sw VAR sw3_fwd
+
+gur_up_sw   VAR sw4_fwd
+gur_down_sw VAR sw4_rev
+
+arm_up_sw   VAR sw5_fwd
+arm_down_sw VAR sw5_rev
+
+drv_down_sw VAR sw6_fwd
+drv_up_sw   VAR sw6_rev
+
+goal_close VAR sw7_fwd
+goal_open  VAR sw7_rev
+
+basket_down_sw VAR sw8_fwd
+basket_up_sw   VAR sw8_rev
+
+
+' [16 on/off switches (inputs) on the Robot]
+rx_sw1    VAR rx_sw.bit0     ' Aliases for each RX switch input
+rx_sw2    VAR rx_sw.bit1
+rx_sw3    VAR rx_sw.bit2
+rx_sw4    VAR rx_sw.bit3
+rx_sw5    VAR rx_sw.bit4
+rx_sw6    VAR rx_sw.bit5
+rx_sw7    VAR rx_sw.bit6
+rx_sw8    VAR rx_sw.bit7
+rx_sw9    VAR rx_sw.bit8
+rx_sw10   VAR rx_sw.bit9
+rx_sw11   VAR rx_sw.bit10
+rx_sw12   VAR rx_sw.bit11
+rx_sw13   VAR rx_sw.bit12
+rx_sw14   VAR rx_sw.bit13
+rx_sw15   VAR rx_sw.bit14
+rx_sw16   VAR rx_sw.bit15
+
+'Gurney & drive wheel lift sensors
+gur_slow_sensor VAR rx_sw1  'inverted
+drv_lift_sensor VAR rx_sw2
+gur_stop_sensor VAR rx_sw3
+
+
+' [8 fwd/rev relays (outputs) on the Robot]
+rly1_fwd  VAR relays.bit0     ' Aliases for each relay output
+rly1_rev  VAR relays.bit1
+rly2_fwd  VAR relays.bit2
+rly2_rev  VAR relays.bit3
+rly3_fwd  VAR relays.bit4
+rly3_rev  VAR relays.bit5
+rly4_fwd  VAR relays.bit6
+rly4_rev  VAR relays.bit7
+rly5_fwd  VAR relays.bit8
+rly5_rev  VAR relays.bit9
+rly6_fwd  VAR relays.bit10
+rly6_rev  VAR relays.bit11
+rly7_fwd  VAR relays.bit12
+rly7_rev  VAR relays.bit13
+rly8_fwd  VAR relays.bit14
+rly8_rev  VAR relays.bit15
+
+open_goal_rly  VAR rly7_fwd     ' goal grabber
+close_goal_rly VAR rly7_rev
+
+down_drv_rly VAR rly8_fwd       ' drive wheel lift
+up_drv_rly   VAR rly8_rev
+
+'
+' Define Constants
+' note: constant expressions are evaluated strictly left to right
+' (no parentheses)
+'
+' Pin Names:
+MASTERCPU CON 0      ' Pin used to communicate with Master CPU
+FPIN      CON 1      ' Pin used to for flow control with Master CPU
+RLYDATA   CON 5      ' Shift Register Data Pin for Relay Outputs
+RLYCLOCK  CON 6      ' Shift Register Clock Pin for Relay Outputs
+RLYLATCH  CON 7      ' Shift Register Latch Pin for Relay Outputs
+SWDATA    CON 8      ' Shift Register Data Pin for Switch Inputs
+SWCLOCK   CON 9      ' Shift Register Clock Pin for Switch Inputs
+SWLATCH   CON 10     ' Shift Register Latch Pin for Switch Inputs
+SSC       CON 11     ' Pin used to communicate with Serial Servo Controller
+ADC_SO    CON 12     ' Analog to Digital Converter (ADC) data output pin
+ADC_SCLK  CON 13     ' ADC Clock Pin
+ADC_CS0   CON 14     ' Pin to initialize/reset ADC
+ADC_SI    CON 15     ' Pin used to send data to ADC
+GOODLED   CON 3      ' Pin used to turn status LED green
+ERRLED    CON 4      ' Pin used to turn status LED red
+' Other stuff
+SSCBAUD   CON $0020  ' Baud rate for communications with SSC
+BS2BAUD   CON $4020  ' Baud rate for communications with BS2 (Master CPU)
+PWM1      CON 8      ' Define SSC addresses for PWM outputs
+PWM2      CON 9      ' (these don't map directly to chip pins)
+PWM3      CON 10
+PWM4      CON 11
+PWM5      CON 12
+PWM6      CON 13
+PWM7      CON 14
+PWM8      CON 15
+SSC_CMD   CON 255    ' Command Prefix for SSC
+
+
+'WS: a bunch of constants specific to WildStang 99...
+
+ANGLE_PWM  CON PWM1     ' the wheel turning motor
+LEFT_PWM   CON PWM2     ' the left wheel motor
+RIGHT_PWM  CON PWM3     ' the right wheel motor
+BASKET_PWM CON PWM4	' the lift (F-P)motor
+SERVO_PWM  CON PWM5     ' the lift-lock servo
+GURNEY_PWM CON PWM6	' the gurney (van door) motor
+ARM_PWM    CON PWM7	' the arm/"elbow" (van door) motor
+CLAW_PWM   CON PWM8	' the claw (F-P) motor
+
+
+
+SLOW_SLICE CON 20    ' execute 1 out of N loops. '10' gives a response
+' of once/second, 5 gives once/half second, etc.
+
+INIT_MODE  CON %00  ' Steering modes. Init might be used to keep
+RIGHT_MODE CON %01  ' robot from lurching when first turned on.
+LEFT_MODE  CON %10  ' These "map" to buttons, so the left bit literaly
+TANK_MODE  CON %11  ' means "left" and must not be re-mapped.
+ANGLE_MODE CON %0100  'need to add mode for Raul's version
+
+DRIVE_SCL CON 50
+DRIVE_CON CON 64
+
+ENABLE  CON 0
+DISABLE CON 1
+
+' Joystick limits
+'JRXL CON 35    'right joystick lowest (right!) x value
+'JRXH CON 250   'right joystick highest (left!) x value
+'JRXC CON 127   'right joystick center value
+
+
+'
+' Initialize Hardware and Variables on Power Up or Reset
+'
+' All pins default to low (ground) & input (floating) on powerup or reset.
+' [dke: we could say OUTS=0 to insure this...)
+' PWM outputs are automatically set to 127 on powerup or reset by the SSC
+' (p.208 "unused pins should be set to output)
+'
+' Set pins to 'output' direction:
+Output SSC          ' Prevent floating before data is sent (low)
+Output FPIN
+Output RLYDATA
+Output RLYCLOCK
+Output RLYLATCH
+Output SWDATA
+Output SWCLOCK
+Output SWLATCH  '(dke: this is redundant)
+Output GOODLED  ' User LED D26 Green
+Output ERRLED   ' User LED D26 Red
+Output ADC_SI
+Output ADC_SCLK
+
+High SWLATCH        ' These should be normally high
+High ADC_CS0
+
+left_speed = 0
+right_speed = 0
+relays = 0          ' Make sure relays all start off
+Gosub SetRelays
+
+'
+' Any additonal initialization:
+' (don't take too long or the master CPU will timeout = Red LED D32. manual p.34)
+'
+
+' Display our team stamp from eeprom <optional>
+'for count15 = 0 to 13
+'  READ eepromID+count15, char_tmp
+'  debug char_tmp
+'next
+'debug CR,CR
+'debug ihex eepromID,cr
+
+
+' example of how to write to console with serout. 'debug' is normally
+' more convenient.  if we want to save this to a file, we must disconnect
+' disconnect ATN pin (stamp manual p.308, fig 1-17.)
+'Serout 16, 16468, ["text from serout",13] '9600 baud inverted, 13=CR
+'Serin  16, 16780, [wait("ok")] '2400 baud, wait for "ok_" entry
+
+
+timeslice=1             'WS: initialize time slicing
+steering_motor = 127    'init=stop, so it doesn't lurch
+
+'buttons_seen = 0
+'driver_seen = 0
+driver_seen = 1  '!! this disables the throttle safety init stuff..
+
+pot_broken = 0
+wheelflag = ENABLE
+prev_sw = 0
+prev_button = 0
+tmp255=0   ' this gets used first to count iterations for the twitch test
+
+'kmk
+twitch_done = TWITCHP  'set to 1 to disable test
+
+
+'start with the lift lock open (cosmetic)
+Serout SSC, SSCBAUD, [SSC_CMD, SERVO_PWM, (0)]
+
+
+'kmk, moved up a bit...
+High ERRLED     'just to indicate we're in 'wait' for driver mode.
+
+'this read is just to make us block before reading the pot
+'startup transients can spin the motor the wrong way and
+'cause the twitch test to fail...
+'kmk (redo more elegantly)
+Serin MASTERCPU\FPIN, BS2BAUD, [Wait(255,255), x1, y1, x2, y2, tx_sw.lowbyte, tx_pot1, wheel1, tx_sw.highbyte, tx_pot2, delta_t, wheel2]
+
+Gosub ReadSensors
+pot_target = steering_pot  'read the pot MID value for the "twitch" test
+  're-using the var 'pot_target' for a different purpose here..
+
+'debug ? pot_target, CR
+
+'mode = INIT_MODE '(changed: now we init to tank and wait for user)
+mode = TANK_MODE
+
+
+
+'                   ------
+' Main Program (main LOOP )
+'                   ------
+Loop:
+
+  Low GOODLED
+  ' ********************************************************************
+  ' STEP 1: COLLECT DATA FROM TRANSMITTER AND ON-BOARD SENSORS
+  ' ********************************************************************
+
+  ' ----------------------
+  '  Get Transmitter data from Master CPU
+  ' ----------------------
+  ' This call must be executed every 10ms or the outputs will be
+  ' disabled by the Master CPU until the data is received (the red
+  ' LED D32 will remain on until the board is reset). Delays like
+  ' debug prints make it fairly likely to come on.
+  '
+  ' wait to see "255 255" (the program actually Blocks here)
+  ' (i.e. "$FF $FF") then receive 11 bytes:
+
+  Serin MASTERCPU\FPIN, BS2BAUD, [Wait(255,255), x1, y1, x2, y2, tx_sw.lowbyte, tx_pot1, wheel1, tx_sw.highbyte, tx_pot2, delta_t, wheel2]
+  High GOODLED
+
+
+  ' Read Receiver Switch Inputs into rx_sw ' turned on 2/6/99
+  Gosub ReadSwitches
+
+
+  ' Read Receiver Analog Sensor Inputs into sensor1-4
+  ' Check the subroutine because certain portions may be commented out!
+  '
+  Gosub ReadSensors
+
+
+	' -------------
+	'  TWITCH TEST
+	' -------------
+	' (only during initialization)
+	' test pot scaling.. if it's not the right direction don't use it.
+	' driving the motor RIGHT (clockwise viewed from base) should
+	' make pot values SMALLER.
+
+	if twitch_done = 1 then twitchdone  ' done, just branch over it
+
+	  ' don't do the test if pot broken because it unaligns the wheels
+	  if steering_pot = 0 then twitchdone
+
+	  if tmp255 < 5 then twitchleft
+	  if tmp255 = 5 then readleft
+	  if tmp255 < 10 then twitchright
+	  if tmp255 = 10 then twitchstop
+
+	  twitchleft:
+	     Serout SSC, SSCBAUD, [SSC_CMD, ANGLE_PWM, 127+30]
+	  goto nexttwitch:
+
+	  readleft:
+'debug ? steering_pot, CR
+	    ' if left pot > mid pot, the scaling is ok...
+	    if (steering_pot > pot_target) then nexttwitch
+	       pot_broken = 1
+	  goto nexttwitch:
+
+	  twitchright:
+	     Serout SSC, SSCBAUD, [SSC_CMD, ANGLE_PWM, 127-30]
+	  goto nexttwitch:
+
+	  twitchstop:
+	     Serout SSC, SSCBAUD, [SSC_CMD, ANGLE_PWM, 127]
+	     twitch_done = 1
+	  goto nexttwitch:
+
+       nexttwitch:
+       tmp255 = tmp255 + 1  ' count main loop iterations to time the test
+       goto Loop
+
+    twitchdone:
+
+  'for safety don't drive any outputs immediately when power is
+  'connected until the throttle is moved (then tank mode will
+  'cause wheels to point forward.
+  if driver_seen = 1 then continue  'branch over
+  'else
+     if (right_y<137) AND (right_y>117) then Loop  'do nothing until input.
+     'else
+	driver_seen = 1
+
+  continue:
+	Low ERRLED
+
+
+  ' ********************************************************************
+  ' STEP 2: CALCULATE ACTIONS BASED ON INPUT DATA
+  ' ********************************************************************
+
+' ----------------------------------------------------------------------
+' fast-response things to be executed every loop go here:
+
+'
+' SET MODE
+'
+
+' BUTTONS
+'
+' if button is pressed, set steering mode.  a closed switch is true (1)
+' (note: using a switch instead of buttons would mean we could check this
+' much less frequently and get rid of the possibility of missed presses
+' and user guessing at the state...)
+' Buttons: trigger on release not depress (think about what happens
+' when you're trying to detect a 2-button press).  Track which buttons
+' have been seen down, interpret them when they're all up.
+'---------------------
+' bitwise OR together the button states and remember them until released
+'buttons_seen = buttons_seen | ((left_button << 1) | right_button)
+'
+'if (left_button=0) AND (right_button=0) AND (buttons_seen <> 0) then set_mode
+'else
+'goto set_mode_done
+'
+'set_mode:
+'  mode = buttons_seen ' this "maps" to TANK_MODE, etc etc.
+'  buttons_seen = 0    ' clear and start watching again
+'set_mode_done:
+'---------------------
+
+'
+' LEFT JOYSTICK
+'     changed to implement Raul's version 2/6/99
+'[Obsolete comments]
+'     if left button and left joystick centered, 
+'          return wheels to center and tank mode.
+'    if left joystick to the right
+'          if left button
+'              take wheels to crab right position
+'          else use proportional input of left joystick to steer
+'     if left joystick to the left
+'        if left button
+'              take wheels to crab left position
+'        else use proportional input of left joystick to steer
+'    if right_button then tank mode and go to center
+
+
+
+'if right_button=1 then set_tank_mode
+if left_button=1 AND left_x < 134 AND left_x > 120 then set_tank_mode
+if (left_button=1 AND left_x > 140) then set_left_mode
+if (left_button=1 AND left_x < 117) then set_right_mode
+'else set to drive tank style in current position of wheels
+   mode=ANGLE_MODE
+goto set_mode_done  'else, leave current mode.
+
+set_tank_mode:
+  mode = TANK_MODE
+goto set_mode_done 
+
+set_left_mode:
+  mode = LEFT_MODE
+goto set_mode_done
+
+set_right_mode:
+  mode = RIGHT_MODE
+goto set_mode_done
+
+set_mode_done:
+
+
+' ------------
+'  DRIVE WHEEL SPEEDS
+' ------------
+
+'should probably also add 'if pot_broken' to this line:
+
+  if ((left_x > 56) AND (left_x < 176)) OR (steering_pot = 0) then tank_speeds
+   ' (pot=0 means it's broken)
+
+   ' ==CRAB MODE==
+   ' else, we're in the "crab" mode
+   ' set both motors to the same speed (may need calibration)
+   ' as given by the y value of right stick.
+
+   right_speed = right_y
+   left_speed  = right_y
+
+   goto speed_done
+
+   ' ==TANK MODE==
+tank_speeds:
+   'if in tank mode, set motor speeds according to the combined x/y equations.
+   'manual p.31 (the 2000s are to avoid negative numbers)
+
+   left_speed  = (((((2000 + right_y - right_x + 127) Min 2000 Max 2254) - 2000)) MAX 254)
+   right_speed = (((((2000 + right_y + right_x - 127) Min 2000 Max 2254) - 2000)) MAX 254)
+
+speed_done:
+
+   if (right_button = 1) OR (right_trigger = 1) then turbo1
+   'else, scale speeds down
+      right_speed = ((right_speed * DRIVE_SCL/100) + DRIVE_CON MAX 254)
+      left_speed  = ((left_speed  * DRIVE_SCL/100) + DRIVE_CON MAX 254)
+   turbo1:
+
+   'Asymetrical drive wheel speed scaling
+   trim = (trim/2)+64 
+
+   if (trim > 128) then scale_left
+      left_speed  = ((left_speed  * trim/128) + 128-trim MAX 254)
+      goto scale_done
+
+   scale_left:
+      trim = 255-trim
+      right_speed = ((right_speed * trim/128) + 128-trim MAX 254)
+
+   scale_done:
+
+   'write the drive wheel PWMs
+   Serout SSC, SSCBAUD, [SSC_CMD, LEFT_PWM,  left_speed]
+   Serout SSC, SSCBAUD, [SSC_CMD, RIGHT_PWM, right_speed]
+
+
+' ----------
+'  STEERING the wheel angle:
+' ----------
+' note: this assumes both the stick and pot are 'center' at 127
+'
+' set the wheel target angle based on mode
+' this "maps" to INIT_MODE=0, RIGHT=1, LEFT=2, TANK=3, ANGLE=4.
+
+'CLEAN THIS UP, get rid of old legacy code..
+'xx lookup mode, [steering_pot, ((left_x MIN (RIGHT_OFFSET+MIN_POT))-RIGHT_OFFSET) MAX 255, (left_x + LEFT_OFFSET) MAX 255, AHEAD_0,(left_x*210/255)+28], pot_target
+'
+'only ANGLE_MODE ever happens now...
+pot_target = (left_x*210/255)+28
+
+
+' (for init mode we set the target to wherever it started,
+' to avoid lurching at powerup)
+' (TANK mode doesn't turn the wheels so it's not a function of x.)
+
+' Demo Mode:
+' Note the following line is for steering test/demo only,
+' it disables the modes and should normally be commented OUT.
+' pot_target = right_x  'just steer proportional to the joystick.
+
+pot_target = pot_target MIN MIN_POT MAX MAX_POT
+
+
+'NOTE: the scaling below was necessary to avoid oscillation on
+'the steering 'prototype' gizmo. it seems the globe motors may
+'have some momentum and introduce a delay as they spin down.
+
+    if (pot_target > steering_pot) then ann
+    if (pot_target < steering_pot) then rachael
+	steering_motor = 127
+	goto angle_done
+
+
+' DANGER:  The certain values within MUST be changed at the same time,
+' e.g., the values "131" were used at one time.  Diana is cool.
+' If they're changed they HAVE to be changd at the same time.
+'
+ann:  ' adjust forward
+    steering_motor = (((pot_target - steering_pot)*1) + 133) MIN 133 MAX 255
+    goto angle_done ' Jim uses 135 to eliminate the dead zone
+
+
+' DANGER:  The certain values within MUST be changed at the same time,
+' e.g., the values "114" were used at one time, otherwise an overflow
+' condition can occur and they crab wheels will then spin w/o end!!
+' If they're changed they HAVE to be changd at the same time.
+'
+rachael:  ' adjust backward
+   ' if target is smaller than pot, run engine backwards (<127)
+   ' to make pot smaller. the speed is 127 - the difference.
+    steering_motor = 119 - (((steering_pot - pot_target)*1) MIN 0 MAX 119)
+    goto angle_done ' Jim uses 119 to eliminate the dead zone
+
+angle_done:
+
+' NOTE: Asymetric  values are used for the motor limits to account for
+' the apparent fact the motor/speed controller combination will turn
+' faster in one direction than the other.
+'
+'debug ? steering_motor
+steering_motor = (steering_motor MIN 30 MAX 245)  ' 30 and 245 are full speed
+
+
+' ------------
+'  POT SAFETY stuff, if twitch test failed, or the pot reads 0...
+' ------------
+if (pot_broken = 1) OR (steering_pot < 1) then stop_steering
+'else
+goto test_done
+
+stop_steering:
+   steering_motor = 127
+   High ERRLED  'but will the green LED overwrite the RED?
+   'debug ? "pot is broken..."
+
+   ''pot_broken=1 ' NO, don't disable permanently, people like
+		  ' to see it recover when fuse is replaced..
+test_done:
+
+
+'Override: (override disables proportional steering)
+' the pot>0 clause can be removed to allow momentary style steering
+' even when the pot isn't broken, but you risk breaking things
+' in this mode, so...
+
+'kmk TEMP: use goto to DISABLE OVERRIDE
+goto pot_stuff_done
+
+if (steering_pot=0 or pot_broken=1) AND (pot_override = 1) then override
+'else no override
+goto pot_stuff_done
+
+override:
+'kmk add min/max
+  steering_motor = left_x MIN 107 MAX 147  'map motor SPEED to left stick
+  'driver must now BE CAREFUL not to rotate wheels past limit
+  'it may be inverted, so you must WATCH which way they go.
+  'it would probably be a good idea to paint some kind of mark
+  'on the wheels to show which way is Front.
+goto pot_stuff_done
+
+pot_stuff_done:
+
+
+
+
+if DEBUG_ENABLE = 0 then end_timeslice  'disable the slow section
+timeslice = timeslice + 1
+if timeslice < SLOW_SLICE then end_timeslice:
+' ----------------------------------------------------------------------
+' things to be executed at a lower frequently than every loop go in here:
+' Like performance-killing debug prints, persistant switches (vs momentary
+' switches), relays that don't need a instant response, writes to eeprom...
+
+
+  Low  GOODLED
+  High ERRLED
+  debug cls
+
+'  debug ibin ? prev_sw
+'  debug ibin ? wheelflag
+
+  debug ibin ? pot_broken
+'  debug "right pwm=", dec tmp255, CR
+
+  ' show tx switches
+'  debug "pin=", dec (NCD tx_sw MIN 1)-1, "  "
+'  debug ibin ? tx_sw
+
+  'debug ibin2 ? buttons_seen
+  'debug ibin4 ? mode
+  debug ? right_x
+
+  'wheel speed when not in tank mode..
+  debug ? right_y
+
+  debug ? left_x
+  debug ? left_y
+
+'  if mode <> TANK_MODE then notank:
+'    'update this up if used...
+'    debug ? left_speed, CR
+'    debug ? right_speed, CR
+'  notank:
+
+  debug ? steering_pot
+  debug ? pot_target
+  debug ? steering_motor
+
+
+'safety catch: shut off motor if we're near the end of the potentiometer
+'in case the pot values don't go all the way to 255, don't keep forcing it..
+'can we somehow account for and protect against getting the polarity backwards?
+'this can be removed for performance if everything is calibrated well.
+'
+'if (steering_pot >= MAX_POT) AND (steering_motor > 127) then aaron
+'if (steering_pot <= MIN_POT) AND (steering_motor < 127) then aaron
+'
+'this way will "hang" the steering if you hit the end. the check is
+'disabled when prints are diabled.
+'
+'if (steering_pot >= MAX_POT) OR (steering_pot <= MIN_POT) then aaron
+'goto chris
+'aaron:
+'  steering_motor = 127  'stop motor
+'chris:
+
+'  debug ? steering_motor
+
+  '(need to make sure char_tmp has been updated recently if using this)
+  '(maybe change this to just print the max from the *previous run
+  ' once during init.)
+  'debug "max_delta_t = ", dec char_tmp,CR
+
+
+  ' write worst case delay to eeprom. (this won't write very often anyway,
+
+
+  ' but to get accurate readings these lines really need to be outside the
+  ' timeslice for the test run.)
+  ' a delta of 2 isn't so bad, but it gets as high as 5 with debug enabled.
+ '
+'  <optional>
+'  READ max_delta_t, char_tmp  'read from eeprom
+'  if delta_t <= char_tmp then maxt_done
+'    WRITE max_delta_t, delta_t
+'  maxt_done:
+
+
+'-----------------------------------------------------------------------
+  timeslice=1   'reset slice counter
+  Low ERRLED  ' Turn LED off
+  High GOODLED
+end_timeslice:
+
+
+' GET RID OF DEFAULTS for now, add to display LEDs when time
+'
+' Set relays to match TX switch inputs
+' relays = tx_sw
+'
+' Use 1st 8 RX switches (rx_sw1-8) as STOP switches for Relays 1-4
+' relays.lowbyte = relays.lowbyte &~ rx_sw.lowbyte
+'
+' Use 2nd 8 RX switches (rx_sw9-16) as GO switches for Relays 5-8
+' relays.highbyte = relays.highbyte | rx_sw.highbyte
+' STUFF THAT OVERRIDES THE DEFAULT SWITCH TO RELAY MAPPING GOES DOWN HERE:
+
+
+
+' --------------
+'  GOAL GRABBER
+' --------------
+'map relays to switch state by default
+close_goal_rly = goal_close
+open_goal_rly  = goal_open
+
+
+' --------
+'  GURNEY
+' --------
+'
+'the 'slowdown' sensor is expected to ALWAYS be 'detecting'
+'(which happens to be 'open', in our case) when we're near
+'the 'stop' switch, i.e. the SW has no
+'way to tell that you're on the 'inside' of it if the
+'driver is just tapping on the switch or something...
+
+'CLEAN up these redundant pwm writes etc..
+
+'if we're lowering the wheels..
+if (gur_down_sw = 1) then ck_gur_switches
+'else, we're going UP..
+  Serout SSC, SSCBAUD, [SSC_CMD, GURNEY_PWM, (127 - (60*gur_up_sw))]
+goto gurneydone
+
+ck_gur_switches:
+  if (gur_stop_sensor = 1) then gurneystop
+ 'else
+  if (gur_slow_sensor = 0) then gurneyslow  'yes, this is inverted
+
+ 'else, just set the fast speeds..
+  Serout SSC, SSCBAUD, [SSC_CMD, GURNEY_PWM, (127 + (126*gur_down_sw) - (60*gur_up_sw))]
+goto gurneydone
+
+gurneyslow:
+  Serout SSC, SSCBAUD, [SSC_CMD, GURNEY_PWM, (127 + (50*gur_down_sw))]
+goto gurneydone
+
+gurneystop:
+  Serout SSC, SSCBAUD, [SSC_CMD, GURNEY_PWM, 127]
+goto gurneydone
+
+gurneydone:
+
+
+
+' ------------
+'  WHEEL LIFT
+' ------------
+
+'when we say "down" below, we mean the wheels, not the robot body...
+if drv_down_sw = 1 then noclearflag  'if we're still doing down, DONT clear
+   wheelflag = ENABLE  'clear flag whenever we're not going down
+noclearflag:
+
+if drv_down_sw = 1 AND drv_lift_sensor = 1 AND prev_sw = 0 AND wheelflag = ENABLE then setflag
+goto nosetflag:
+setflag:
+   wheelflag = DISABLE
+nosetflag:
+
+'map relays to switch state by default
+up_drv_rly   = drv_up_sw
+down_drv_rly = drv_down_sw
+
+'override wheel-down relay if we're at the stop point
+if wheelflag = ENABLE then nodisable
+'else
+   down_drv_rly = 0
+nodisable:
+
+prev_sw = drv_lift_sensor  'update 'previous' switch
+
+
+
+  ' ********************************************************************
+  ' STEP 3: PERFORM ACTIONS
+  ' ********************************************************************
+
+  ' Update PWM Outputs
+  ' WS: some PWMs were set earlier because they are mode-dependent.
+
+  Serout SSC, SSCBAUD, [SSC_CMD, ANGLE_PWM, steering_motor] ' Update PWM outputs
+
+
+' -------------
+'  BASKET LIFT
+' -------------
+' CLEAN THIS UP so there's just one write to the pwm!
+
+  Serout SSC, SSCBAUD, [SSC_CMD, BASKET_PWM, (127 + (20*basket_down_sw) - (127*basket_up_sw))]
+
+' LIFT LOCK for basket (servo) lift_lock=binary button 1/0
+  Serout SSC, SSCBAUD, [SSC_CMD, SERVO_PWM, (162*lift_lock)]
+
+  'unlock unconditionally when basket is going up
+  if (basket_up_sw = 0) then no_auto  'skip over unless going up..
+  'else, auto unlock
+    Serout SSC, SSCBAUD, [SSC_CMD, SERVO_PWM, (0)]
+  no_auto:
+
+  ' if we just released the lock button, bump the lift up a moment
+  if (prev_button = 1) AND (lift_lock = 0) then bump
+   'else
+    goto unlock_done
+
+bump:
+    ' drive basket up a sec..
+    '(this PWM will simply be overwritten next time around the loop)
+     Serout SSC, SSCBAUD, [SSC_CMD, BASKET_PWM, 0]  'pwm 0=up
+unlock_done:
+
+  prev_button = lift_lock
+
+
+' ------------
+'  ARM & CLAW
+' ------------
+  Serout SSC, SSCBAUD, [SSC_CMD, ARM_PWM,  (127 + (127*arm_up_sw) - (50*arm_down_sw))]
+  Serout SSC, SSCBAUD, [SSC_CMD, CLAW_PWM, (127 + (33*claw_close_sw) - (33*claw_open_sw))]
+
+
+  ' DONT re-set any motor speeds which were already set inline..
+
+  ' Update Relay Outputs
+  Gosub SetRelays
+
+  ' ********************************************************************
+  ' STEP 4: RETURN TO BEGINNING AND WAIT FOR MORE DATA
+  ' ********************************************************************
+
+  Goto Loop ' Start over at Loop:
+
+End ' It should never actually get here!
+
+
+
+' ********************************************************************
+'
+' Subroutines
+'
+' ********************************************************************
+
+ReadSwitches: ' Reads Receiver-side switch inputs into variable rx_sw
+  Pulsout SWLATCH, 1    'high... low-high,
+  Low SWLATCH           'hold low,
+  Pulsout SWCLOCK, 1    'high-low,
+  High SWLATCH          'hold high...
+  Shiftin SWDATA, SWCLOCK, LSBPRE, [rx_sw\16] ' Read in the data, 16 bits
+  rx_sw = rx_sw ^ 65535 ' Invert bits so that a closed switch is true (1)
+  'rx_sw = rx_sw ^ %11111111  'more readable..
+Return
+
+
+ReadSensors: ' Read receiver sensor inputs into variables sensor1-4
+  '
+  ' WS: the wheel angle pot
+  '
+  ' Read Channel 1 (Comment out next 4 lines if not using sensor1)
+  Low ADC_CS0                                  ' Initialize ADC
+  Shiftout ADC_SI, ADC_SCLK, msbfirst, [12\4]  ' Select Channel 1
+  Shiftin ADC_SO, ADC_SCLK, msbpost, [sensor1] ' Read Channel 1, 8 bits
+  High ADC_CS0                                 ' Reset ADC
+
+
+' DANGER:  The variables "sensor2", etc., may not have been declared
+' because of memory constraints.  Check the code carefully!
+
+  ' Read Channel 2 (Comment out next 4 lines if not using sensor2)
+'  Low ADC_CS0                                  ' Initialize ADC
+'  Shiftout ADC_SI, ADC_SCLK, msbfirst, [14\4]  ' Select Channel 2
+'  Shiftin ADC_SO, ADC_SCLK, msbpost, [sensor2] ' Read Channel 2
+'  High ADC_CS0                                 ' Reset ADC
+
+  ' Read Channel 3 (Comment out next 4 lines if not using sensor3)
+'  Low ADC_CS0                                  ' Initialize ADC
+'  Shiftout ADC_SI, ADC_SCLK, msbfirst, [13\4]  ' Select Channel 3
+'  Shiftin ADC_SO, ADC_SCLK, msbpost, [sensor3] ' Read Channel 3
+'  High ADC_CS0                                 ' Reset ADC
+
+  ' Read Channel 4 (Comment out next 4 lines if not using sensor4)
+'  Low ADC_CS0                                  ' Initialize ADC
+'  Shiftout ADC_SI, ADC_SCLK, msbfirst, [15\4]  ' Select Channel 4
+'  Shiftin ADC_SO, ADC_SCLK, msbpost, [sensor4] ' Read Channel 4
+'  High ADC_CS0                                 ' Reset ADC
+Return
+
+
+SetRelays: ' Use data in variable "relays" to control actual relays
+  Shiftout RLYDATA, RLYCLOCK, LSBFIRST,[relays\16]  '16 bits
+  Pulsout RLYLATCH, 1   'low... high-low...
+Return
+
+
+error:
+  debug "something went wrong.  figure it out..."
+Return
+
+
+Transform:  'transform the global byte 'tmp255'
+' debug ? right_y
+' debug "input=", dec tmp255
+
+  ' index into the eeprom transform table and write the result back
+  ' NOTE: this is disabled when the READ line is commented out.
+'  READ xtable+tmp255, tmp255
+
+' debug " output=", dec tmp255, CR
+Return
+
+
+'Transform2:  'transform the global byte 'tmp255'
+' this should be rewritten by hand so we can use bytes instead
+' of words.. the 'lookup' command eats up too much memory.
+' debug ? right_y
+' debug "input=", dec tmp255
+'   lookup tmp255, [39,41,42,44,45,46,48,49,51,52,53,55,56,57,59,60,61,62,64,65,66,67,68,69,71,72,73,74,75,76,77,78,79,80,81,82,83,83,84,85,86,87,88,89,89,90,91,92,92,93,94,95,95,96,97,97,98,99,99,100,100,101,102,102,103,103,104,104,105,106,106,107,107,107,108,108,109,109,110,110,111,111,111,112,112,113,113,113,114,114,115,115,115,116,116,116,117,117,117,118,118,118,119,119,119,119,120,120,120,121,121,121,121,122,122,122,123,123,123,123,124,124,124,124,125,125,125,125,126,126,126,127,127,127,127,128,128,128,129,129,129,129,130,130,130,131,131,131,132,132,132,133,133,133,134,134,134,135,135,135,136,136,137,137,137,138,138,139,139,140,140,141,141,142,142,143,143,144,144,145,145,146,146,147,147,148,149,149,150,151,151,152,153,153,154,155,155,156,157,158,158,159,160,161,162,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,184,185,186,187,189,190,191,192,194,195,196,198,199,201,202,203,205,206,208,210,211,213,214,216,218,219,221,223,224,226], tmp255
+' debug " output=", dec tmp255, CR
+'Return
+
